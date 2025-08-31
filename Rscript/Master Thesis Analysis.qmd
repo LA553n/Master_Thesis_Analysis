@@ -1,0 +1,549 @@
+---
+title: "Master Thesis Analysis"
+author: "Lucas J. Assen"
+date: "17-06-2025"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    anchor-sections: true
+    number-sections: true
+    fig-width: 10  
+    fig-height: 8
+---
+# Relevant packages
+
+The following is the list of packages necessary to run the script. Please install any missing packages beforehand.
+```{r message = FALSE, warning = FALSE}
+library(tidyverse)
+library(lme4)
+library(dplyr)        
+library(lmerTest)       
+library(emmeans)        
+library(performance)    
+library(DHARMa)         
+library(broom.mixed)    
+library(gtsummary)     
+library(patchwork)      
+library(tidymodels) 
+library(ranger)
+library(effects)
+library(effectsize)
+library(readxl)
+library(purrr)
+library(e1071)
+```
+
+# Loading the data 
+
+All file paths are detected based on naming convention, stored in a list and loaded into one data set. Afterwards, some of the variables are explicitly typecasted to factor variables.
+```{r message = FALSE, warning= FALSE}
+# adjust pattern in case naming convention differ or if files are stored in a different location
+csv_files <- list.files(pattern = "_band_region_timeseries.csv",
+  full.names = TRUE)
+
+D_0 <- csv_files %>%
+  set_names() %>%                      
+  map_dfr(~ read_csv(.x,
+        show_col_types = FALSE,
+        col_types = cols(participant_id = col_skip())),
+    .id = "filename") %>%
+  mutate(participant_id = factor(match(filename, unique(filename)))) %>%
+  select(-filename) 
+
+D_0 <- D_0 %>%
+  mutate(group = factor(group, levels = c("Control", "Buddhist")),
+    practice_type = factor(practice_type, levels = c("LK", "FA")),
+    region = factor(region, levels = c("T1", "T2", "O", "C", "F1", "F2", "P1", "P2")),
+    freq_band = factor(freq_band, levels = c("delta", "theta", "alpha", "beta")),
+    rating = factor(rating, levels = c("2", "3")),
+    timepoint = factor(timepoint, levels = 1:14))
+
+#Use this only when importing erds in percentage and you require a log-transform
+#D_0 <- D_0 %>% 
+  #mutate(erds_db = 10 * log10(1 + erds_db / 100))
+
+glimpse(D_0)
+```
+
+This second list of files is used to import the alpha/theta ratio data and merge it with the relevent factors present in the D_0 data set.
+```{r}
+#Again change the path or pattern if needed
+csv_files_2 <- list.files(path = "alpha_theta_ratio/",
+                          pattern = "_ratio.csv",
+                          full.names = TRUE)
+
+D_0B <- csv_files_2 %>%
+  set_names() %>%                      
+  map_dfr(~ read_csv(.x,
+        show_col_types = FALSE,
+        col_types = cols(participant_id = col_skip())),
+    .id = "filename") %>%
+  mutate(participant_id = factor(match(filename, unique(filename)))) %>%
+  select(-filename) 
+
+D_0B <- D_0B %>%
+  mutate(group = factor(group, levels = c("Control", "Buddhist")),
+    region = factor(region, levels = c("T1", "T2", "O", "C", "F1", "F2", "P1", "P2")),
+    rating = factor(rating, levels = c("2", "3")),
+    timepoint = factor(timepoint, levels = 1:14))
+
+Practice <- D_0 %>% 
+  select(group, block, timepoint, practice_type, participant_id, region, rating) %>% 
+  distinct()                           
+
+ratio_lookup <- D_0B %>% 
+  select(participant_id, block, timepoint, region, rating, alpha_theta_ratio) 
+
+D_0B <- Practice %>% 
+  left_join(ratio_lookup, by = c("participant_id",
+                                 "block",
+                                 "timepoint",
+                                 "region",
+                                 "rating")) 
+str(D_0B)
+```
+
+# Descriptive statistics
+## Summary tables
+
+Here two look up variables are created which enable the selection of the relevant regions and band for the analyses performed in this study. Afterwards a function is defined for the calculation of the means and standard deviations for each variable. Afterwards four tables are created 2 with the averages of the theta and alpha ERD/S across the four regions for both the group and practice comparison and 2 tables with the averages in the alpha/theta ratio across regions for both comparisons.
+```{r message = FALSE}
+Regions  <- c("O", "C", "F1", "F2")
+Bands    <- c("alpha", "theta")
+mean_sd <- function(x) sprintf("%.2f ± %.2f", mean(x), sd(x))
+
+#First table comparing the means and standard deviations across regions and theta and alpha bands for both groups
+D_Table_LK <- D_0 %>%
+  filter(practice_type == "LK",
+         region %in% Regions,
+         freq_band %in% Bands)
+
+D_Table_Group <- D_Table_LK %>%
+  group_by(region, freq_band, group) %>%
+  summarise(stat = mean_sd(erds_db), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = stat) %>%
+  arrange(freq_band, region)
+
+knitr::kable(
+  D_Table_Group,
+  caption = "**Table 1.**  Mean ± SD ERD/S (dB) for Loving‑Kindness meditation Across regions and Between Groups for the Theta and Alpha Band",
+  align = "lcc")
+
+#Second table comparing the means and standard deviations across regions and theta and alpha bands for both practice types
+
+D_Table_LK_FA_Comp <- D_0 %>%
+  filter(group == "Buddhist",
+         region %in% Regions,
+         freq_band %in% Bands)
+
+table_practice <- D_Table_LK_FA_Comp %>%
+  group_by(region, freq_band, practice_type) %>%
+  summarise(stat = mean_sd(erds_db), .groups = "drop") %>%
+  pivot_wider(names_from = practice_type, values_from = stat) %>%
+  arrange(freq_band, region)
+
+knitr::kable(
+  table_practice,
+  caption = "**Table 2.**  Mean ± SD ERD/S (dB) for Each Practice Type Across regions for the Theta and Alpha Band",
+  align = "lcc")
+
+#Third table comparing the means and standard deviations of the alpha/theta ratio for both groups
+D_Group_Comp_Freq_ratio <- D_0B %>% 
+  filter(practice_type == "LK",
+         region %in% Regions)
+
+Table_Group_Ratio <- D_Group_Comp_Freq_ratio %>% 
+  group_by(region, group) %>% 
+  summarise(stat = mean_sd(alpha_theta_ratio), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = stat) %>%
+  arrange(region)
+
+knitr::kable(
+  Table_Group_Ratio,
+  caption = "Mean (SD) Alpha/Theta Ratio for Loving-Kindness Meditation Across the Buddhist and Control group",
+  align = "lcc")
+
+D_Practice_Comp_Freq_ratio <- D_0B %>% 
+  filter(group == "Buddhist",
+         region %in% Regions)
+
+#Fourth table comparing the means and standard deviations of the alpha/theta ratio for both practice types
+Table_Practice_Ratio <- D_Practice_Comp_Freq_ratio %>% 
+  group_by(region, practice_type) %>% 
+  summarise(stat = mean_sd(alpha_theta_ratio), .groups = "drop") %>%
+  pivot_wider(names_from = practice_type, values_from = stat) %>%
+  arrange(region)
+
+knitr::kable(
+  Table_Practice_Ratio,
+  caption = "Mean (SD) Alpha/Theta Ratio Across Loving-Kindness Meditation and Focused-Attention Meditation Within the Buddhist Group",
+  align = "lcc")
+```
+
+## Distribution plots
+### Comparison between Buddhists and Controls
+These plots explore the distribution of the theta and alpha ERD/S and the alpha/theta ratio through the use of boxplots with overlay-ed violin plots.
+```{r}
+#First plot is for the ERD/S distribution across groups over the frequency bands and regions
+Plot_1 <- ggplot(D_Table_LK,
+                     aes(x = interaction(region, freq_band, sep = "·"),
+                         y = erds_db,
+                         fill = group)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_violin(alpha = 0.3) +
+  labs(x = NULL, y = "ERDS (dB)",
+       title = "Visualised ERDS Distribution for Loving Kindness Meditation 
+Across the Budhists and Controls") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Plot_1
+
+#Plot 1.5 is still a cross group and region comparison but now for the alpha/theta ratio.
+Plot_1.5 <- ggplot(D_Group_Comp_Freq_ratio,
+                     aes(x = region,
+                         y = alpha_theta_ratio,
+                         fill = group)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_violin(alpha = 0.3) +
+  labs(x = NULL, y = "ERDS (dB)",
+       title = "Visualised Alpha Theta Ratio for Loving Kindness Meditation 
+Across the Budhists and Controls ") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Plot_1.5
+```
+
+### Comparison between LK and FA for the Buddhist group
+```{r}
+#Plot 2 focuses on the cross practice type comparison for the frequency bands and regions.
+Plot_2 <- ggplot(D_Table_LK_FA_Comp,
+                        aes(x = interaction(region, freq_band, sep = "·"),
+                            y = erds_db,
+                            fill = practice_type)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_violin(alpha = 0.3) +
+  labs(x = NULL, y = "ERDS (dB)",
+  title = "Visualised ERDS Distribution for Buddhist 
+Across Meditation Types") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Plot_2
+
+#Similarly plot 2.5 focuses on a cross group and region comparison but now for the alpha/theta ratio.
+Plot_2.5 <- ggplot(D_Practice_Comp_Freq_ratio,
+                     aes(x = region,
+                         y = alpha_theta_ratio,
+                         fill = practice_type)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_violin(alpha = 0.3) +
+  labs(x = NULL, y = "Alpha/Theta Ratio",
+       title = "Visualised Alpha Theta Ratio for Buddhists Across Different 
+Types of Meditation") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Plot_2.5
+```
+
+### Improved plots
+Lastly, for the descriptives two improved distribution plots were created that show the theta and alpha ERD/S and alpha/theta ratio in one plot per practice type or group comparison FUrthermore, the values were plotted next to the distribution to better show outliers and in order to show the dircetion of the data, either through rank ordering links between participants in the group comparison plot, or by participant link in the practice comparison plot. Furthermore, errors bars around the mean point were included.
+```{r}
+#First the ERD/S data is merged with the alpha/theta ratio data and elongated to be stored in one metric variable.
+erds_long <- D_0 %>% 
+  filter(region %in% Regions,
+         freq_band %in% Bands) %>% 
+  group_by(participant_id, group, practice_type, region, freq_band) %>% 
+  summarise(value = mean(erds_db), .groups = "drop") %>% 
+  mutate(metric = recode(freq_band,
+                         theta = "Theta ERDS (dB)",
+                         alpha = "Alpha ERDS (dB)"))
+
+ratio_long <- D_0B %>% 
+  filter(region %in% Regions) %>% 
+  group_by(participant_id, group, practice_type, region) %>% 
+  summarise(value = mean(log(alpha_theta_ratio)), .groups = "drop") %>% 
+  mutate(metric = "Alpha / Theta ratio")
+
+all_long <- bind_rows(erds_long, ratio_long) %>% 
+  mutate(metric = factor(metric,
+                         levels = c("Theta ERDS (dB)",
+                                    "Alpha ERDS (dB)",
+                                    "Alpha / Theta ratio")))
+
+
+# All data belonging to the cross group comparison is filtered from the full long data set and averaged across regions to get one value per participant. Furtermore, to establish connections between participants in the cross group comparison they are rank order linked based on their value for each metric. 
+D_figA <- all_long %>% 
+  filter(practice_type == "LK") %>% 
+  group_by(participant_id, group, metric) %>% 
+  summarise(value = mean(value), .groups = "drop") %>% 
+  group_by(metric, group) %>% 
+  mutate(rank_id = row_number(value)) %>% 
+  ungroup() %>% 
+  unite(pair_id, metric, rank_id, remove = FALSE)  # keep it!
+
+gp_cols <- c(Control  = "#E1B87A",  Buddhist = "#A9ADD6")
+
+figA <- ggplot() +
+  geom_boxplot(data = D_figA,
+               aes(x = group, y = value, fill = group),
+               width = .55,
+               alpha = .25,
+               colour = "black",
+               outlier.shape = NA) +
+  stat_summary(data = D_figA,
+               aes(x = group, y = value),
+               fun.data = mean_se,
+               geom = "errorbar",
+               colour = "red",
+               width = .20,
+               linewidth = .9) +
+  stat_summary(data = D_figA,
+    aes(x = group, y = value),
+    fun = mean,
+    geom = "point",
+    colour = "red",
+    size = 2) +
+  geom_line(
+    data = D_figA,
+    aes(x = as.numeric(group), y = value, group = pair_id),
+    colour = "grey60", alpha = .6) +
+  geom_point(data  = D_figA,
+             aes(x = group, y = value),
+             size = 2) +
+  facet_wrap(~ metric, nrow = 1, scales = "fixed") +
+  scale_fill_manual(name = "Group", values = gp_cols) +
+  labs(title = "Group comparison (LK blocks)", x = NULL, y = NULL) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top",
+        legend.title = element_text(size = 11),
+        strip.text = element_text(face = "bold"),
+        plot.title = element_text(size = 14, hjust = .5))
+
+# Now the identical process happens for the cross practice comparison by filtering for the Buddhist group. The difference here is that since this is a within group comparison, participants are linked to their own data point across practices as oposed to a rank order link.
+D_figB <- all_long %>% 
+  filter(group == "Buddhist") %>% 
+  group_by(participant_id, practice_type, metric) %>%       
+  summarise(value = mean(value), .groups = "drop")
+
+practice_cols <- c(LK = "#87C7B8",FA = "#B4CF72")
+
+figB <- ggplot() +
+  geom_boxplot(data  = D_figB,
+               aes(x = practice_type, y = value, fill = practice_type),
+               width = .55,
+               alpha = .25,
+               colour = "black",
+               outlier.shape  = NA) +
+  stat_summary(data = D_figB,
+               aes(x = practice_type, y = value),
+               fun.data = mean_se,
+               geom = "errorbar",
+               colour = "red",
+               width = .20,
+               linewidth = .9) +
+  stat_summary(data = D_figB,
+               aes(x = practice_type, y = value),
+               fun = mean,
+               geom = "point",
+               colour = "red",
+               size = 2) +
+  geom_line(data = D_figB,
+            aes(x = as.numeric(practice_type), y = value,
+                group = participant_id),
+            colour = "grey65", alpha = .65) +
+  geom_point(data  = D_figB,
+             aes(x = practice_type, y = value),
+             size = 2) +
+  facet_wrap(~ metric, nrow = 1, scales = "fixed") +
+  scale_fill_manual(name = "Practice type", values = practice_cols) +
+  labs(title = "Practice-type comparison (Buddhists)",
+       x = NULL, y = NULL) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top",
+        legend.title    = element_text(size = 11),
+        strip.text      = element_text(face = "bold"),
+        plot.title      = element_text(size = 14, hjust = .5))
+
+figA
+figB
+```
+
+As additional descriptors for the improved plots, the relevant values are extracted from the data.
+```{r}
+Desc_figA <- D_figA %>% 
+  group_by(metric, group) %>% 
+  summarise(n = n(),
+            min = min(value),
+            p10 = quantile(value, .10),         
+            q25 = quantile(value, .25),
+            median = median(value),
+            q75 = quantile(value, .75),
+            p90 = quantile(value, .90),          
+            max = max(value),
+            iqr = IQR(value),
+            sd = sd(value),
+            skew = e1071::skewness(value),
+            n_out = sum(value < (q25 - 1.5*iqr) | value > (q75 + 1.5*iqr)),
+            .groups = "drop")
+Desc_figA
+
+Desc_figB <- D_figB %>% 
+  group_by(metric, practice_type) %>% 
+  summarise(n = n(), 
+            min = min(value),
+            p10 = quantile(value, .10),         
+            q25 = quantile(value, .25),
+            median = median(value),
+            q75 = quantile(value, .75),
+            p90 = quantile(value, .90),       
+            max = max(value),
+            iqr = IQR(value),
+            mn = mean(value),
+            sd = sd(value),
+            skew = e1071::skewness(value),
+            n_out = sum(value < (q25 - 1.5*iqr) | value > (q75 + 1.5*iqr)),
+            .groups = "drop")
+Desc_figB
+```
+
+# Manipulation check
+For the manipulation check a separate data file is loaded containing the results of the questionnaires. Two t-test are performed to check whether Buddhists score significantly higher than controls on the MAAS questionaire and whether Buddhists score significantly higher than the midpoint of the scale. 
+```{r message= FALSE, warning=FALSE}
+D_Questionaire <- read_excel("Behav_data/Questionaires_data.xlsx")
+
+# Between group manipulation check
+M_check_group <- t.test(Maas_total ~ Group,
+                  data    = D_Questionaire,
+                  alternative = "two.sided")
+print(M_check_group)
+
+# Within Buddhist group check 
+D_Questionaire_bud <- D_Questionaire %>% 
+  filter(Group == "Buddhist") 
+
+M_check_practice <- t.test(x = D_Questionaire_bud$Maas_total,
+                mu = 45,
+                alternative = "greater")
+print(M_check_practice)
+```
+
+# Statistical Validation Through Linear Mixed Modeling
+
+## Between group comparison
+A linear mixed model is run for each of the regions for the ERD/s in the theta and alpha band and for the alpha theta ratio, in order to uncover interaction effects for time point and group or general group effects. The models are inspected using saitterthwaites Type III ANOVAs and the interaction effects are inspected using bonferroni corrected group contrasts for the post hocs. The models themselves are checked using performance::check_models() to ensure that they conform to parametricity rules. Hence that the alpha/theta ratio is log-transformed.
+```{r}
+#To change the region of the model change the region filter to either "O", "C", "F1", or "F2", and change freq_band to either "alpha" or "theta" depending on the band you want to view.  Use 'region %in% Regions' if you want to view all regions at once, wich is useful for plotting later on. Be sure to then add region as an additional predictor in the model and in the post hocs.
+D_LK <- D_0 %>% 
+  filter(practice_type == "LK", 
+         region %in% c("F2"),     
+         freq_band == "alpha")
+
+# Use this data set in the model if you want to look at the alpha/theta ratio. Using different regions or all regions at once works the same as before.
+D_Group_Comp_Freq_ratio_M1 <- D_Group_Comp_Freq_ratio %>% 
+  filter(region %in% c("F2")) %>% 
+  mutate(alpha_theta_ratio = log(alpha_theta_ratio))
+
+M1 <- lmer(alpha_theta_ratio ~ group * timepoint +
+             (1|participant_id) + (1|participant_id:block),
+           data = D_Group_Comp_Freq_ratio_M1)
+
+
+anova(M1)
+eta_squared(M1)
+summary(M1)
+
+Post_hoc_M1 <- emmeans(M1,~ group | timepoint) %>% 
+  pairs(adjust = "bonferroni")
+
+tidy(Post_hoc_M1, conf.int = TRUE) 
+
+performance::check_model(M1)
+```
+
+Following the creation of the linear mixed models for the group comparison they can be plotted.
+```{r}
+ae.M1 <- allEffects(M1)
+plot(ae.M1)
+
+ae.M1 <- allEffects(M1, confidence.level = .95)
+ae.M1.df <- as.data.frame(ae.M1[[1]])
+
+#When plotting for different regions or dependent variables change the ggtitle accordingly
+plot.m.blk <- ggplot(ae.M1.df, aes(x=timepoint, y=fit, group=group))+
+  geom_ribbon(aes(ymin=lower, ymax=upper, fill=group), alpha = 0.2) +
+  geom_line(aes(color=group), size = 1.5) +
+  geom_point(aes(color=group, shape=group), linewidth = 5) +
+  ylab("Alpha/Theta Ratio")+
+  xlab("5 Second Timepoints")+
+  ggtitle("Overtime changes in the Alpha/Theta Ratio 
+  per Group Across Regions") +
+  scale_fill_manual(values=c('#999999','#009E73'), name="Group") +
+  scale_color_manual(values=c('#999999','#009E73'), name="Group") +
+  scale_shape_manual(values=c(16, 17), name = "Group")+
+  theme_classic(base_size = 15) #+ 
+  #facet_wrap(~ region) # use this line in case you used regions as a predictor during the creation of the linear mixed models
+print (plot.m.blk)
+```
+
+## Within group practice comparison
+For comparisons across practice types the models were created in similar fashion. A linear mixed model is run for each of the regions for the ERD/s in the theta and alpha band and for the alpha theta ratio, in order to uncover interaction effects for time point and practice or general practice effects. The models are inspected using saitterthwaites Type III ANOVAs and the interaction effects are inspected using bonferroni corrected practice contrasts for the post hocs. The models themselves are checked using performance::check_models() to ensure that they conform to parametricity rules. Hence that the alpha/theta ratio is again log-transformed.
+```{r}
+#To change the region of the model change the region filter to either "O", "C", "F1", or "F2", and change freq_band to either "alpha" or "theta" depending on the band you want to view.  Use 'region %in% Regions' if you want to view all regions at once, wich is useful for plotting later on. Be sure to then add region as an additional predictor in the model and in the post hocs.
+D_Practice_Comp <- D_0 %>% 
+  filter(group == "Buddhist",
+         region %in% c("F2"),     
+         freq_band == "alpha")
+
+# Use this data set in the model if you want to look at the alpha/theta ratio. Using different regions or all regions at once works the same as before.
+D_Practice_Comp_Freq_ratio_M2 <- D_Practice_Comp_Freq_ratio %>% 
+  filter(region %in% c("O"))%>% 
+  mutate(alpha_theta_ratio = log(alpha_theta_ratio))
+
+M2 <- lmer(alpha_theta_ratio ~ practice_type * timepoint +
+             (1|participant_id) + (1|participant_id:block),
+           data = D_Practice_Comp_Freq_ratio_M2)
+
+anova(M2)
+eta_squared(M2)
+summary(M2)
+
+Post_hoc_M2 <- emmeans(M2, ~ practice_type | timepoint) %>% 
+  pairs(adjust = "bonferroni")
+
+tidy(Post_hoc_M2, conf.int = TRUE) 
+tidy(M2, effects = "fixed", conf.int = TRUE)
+performance::check_model(M2)
+```
+
+Following the creation of the linear mixed models for the group comparison they can be plotted.
+```{r}
+ae.M2 <- allEffects(M2)
+plot(ae.M2)
+
+ae.M2 <- allEffects(M2, confidence.level = .95)
+ae.M2.df <- as.data.frame(ae.M2[[1]])
+
+#When plotting for different regions or dependent variables change the ggtitle accordingly
+plot.m.blk <- ggplot(ae.M2.df, aes(x=timepoint, y=fit, group=practice_type))+
+  geom_ribbon(aes(ymin=lower, ymax=upper, fill=practice_type), alpha = 0.2) +
+  geom_line(aes(color=practice_type), size = 1.5) +
+  geom_point(aes(color=practice_type, shape=practice_type), linewidth = 5) +
+  ylab("Alpha/Theta Ratio")+
+  xlab("5 Second Timepoints")+
+  ggtitle("Overtime changes in the Alpha/Theta Ratio 
+  per Type of practice Across Regions") +
+  scale_fill_manual(values=c('#999999','#009E73'), name="Practice Type") +
+  scale_color_manual(values=c('#999999','#009E73'), name="Practice Type") +
+  scale_shape_manual(values=c(16, 17), name = "Practice Type")+
+  theme_classic(base_size = 15) #+ 
+  #facet_wrap(~ region) # use this line in case you used regions as a predictor during the creation of the linear mixed models
+print (plot.m.blk)
+```
+
+
+
